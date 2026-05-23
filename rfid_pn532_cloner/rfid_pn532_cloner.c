@@ -1,11 +1,15 @@
 #include <Wire.h>
 #include <Adafruit_PN532.h>
+#include <SPI.h>
+#include <FS.h>
+#include <SD.h>
 
 #define IRQ_PN532 (2)
 #define RST_PN532 (3)
 
 #define TIMEOUT 1000
 #define PN532_EMSG "[-] Cannot init or setup PN532"
+#define SD_EMSG "[-] Cannot mount SD"
 
 #define ZERO_BLOCK 0
 #define BLOCK_SIZE 16
@@ -14,8 +18,8 @@
 
 Adafruit_PN532 nfc(IRQ_PN532, RST_PN532);
 
-bool is_jcop41(uint8_t* block_data) {
-  return (block_data[0] == 0x6d && block_data[1] == 0x00 && block_data[2] == 0x7d && block_data[3] == 0x00 && block_data[4] == 0xff && block_data[5] == 0xff && block_data[6] == 0xff);
+bool is_not_mifare(uint8_t* block_data) {
+  return ((block_data[0] == 0x6d || block_data[0] == 0x6e) && block_data[1] == 0x00 && (block_data[2] == 0x7d || block_data[2] == 0x7c) && block_data[3] == 0x00 && block_data[4] == 0xff && block_data[5] == 0xff && block_data[6] == 0xff);
 }
 
 bool is_block_empty(uint8_t* block_data) {
@@ -86,30 +90,6 @@ int8_t memcmp(uint8_t* arg1, uint8_t* arg2, uint8_t len) {
   return 0;
 }
 
-void setup() {
-  Serial.begin(115200);
-  pinMode(2, OUTPUT);
-
-  if (nfc.begin() <= 0) {
-    throw_error(PN532_EMSG);
-  }
-
-  uint32_t version = nfc.getFirmwareVersion();
-
-  if (!version) {
-    throw_error(PN532_EMSG);
-  }
-
-  Serial.println("[+] PN532 init");
-  print_firmware_version(version);
-
-  if (nfc.SAMConfig() <= 0) {
-    throw_error(PN532_EMSG);
-  }
-
-  Serial.println();
-}
-
 uint8_t calculate_checksum(uint8_t* new_uid) {
   return new_uid[0] ^ new_uid[1] ^ new_uid[2] ^ new_uid[3];
 }
@@ -138,8 +118,60 @@ uint8_t uid_attemps = 100;
 uint8_t auth_attemps = 10;
 uint8_t read_write_attemps = 5;
 
+void setup() {
+  Serial.begin(115200);
+  pinMode(2, OUTPUT);
+
+  if (nfc.begin() <= 0) {
+    throw_error(PN532_EMSG);
+  }
+
+  uint32_t version = nfc.getFirmwareVersion();
+
+  if (!version) {
+    throw_error(PN532_EMSG);
+  }
+
+  Serial.println("[+] PN532 init");
+  print_firmware_version(version);
+
+  if (nfc.SAMConfig() <= 0) {
+    throw_error(PN532_EMSG);
+  }
+
+  Serial.println();
+
+  if (SD.begin(5, SPI, 4000000) <= 0) {
+    throw_error(SD_EMSG);
+  }
+
+  Serial.print("[+] SD card mounted\n[i] Card type : ");
+
+  switch (SD.cardType()) {
+    case CARD_MMC: {Serial.println("MMC"); break;}
+    case CARD_SD: {Serial.println("SD"); break;}
+    case CARD_SDHC: {Serial.println("SDHC"); break;}
+    case CARD_NONE: {Serial.println("NONE"); break;}
+    default: Serial.println("UNKNOWN");
+  }
+
+  uint64_t card_size = SD.cardSize();
+
+  if (card_size <= 0) {
+    throw_error("[-] Cannot read card size");
+  }
+
+  Serial.printf("[i] Card size : %llu bytes\n\n", card_size);
+}
+
 void loop() {
-  Serial.println("[i] Move card wich will be cloned\n");
+  Serial.println("[i] Move card which will be cloned\n");
+
+  File logs = SD.open("/pn532_logs.txt", "a");
+
+  if (logs <= 0) {
+    throw_error("[!] Cannot read or create \"/pn532_logs.txt\"");
+  }
 
   while (!card_found && uid_attemps) {
     card_found = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid2clone, &uid_len, TIMEOUT);
@@ -148,6 +180,7 @@ void loop() {
 
   if (!card_found) {
     Serial.println("[-] Card not found. Process finished. Reset ESP32 to restart");
+    logs.close();
     sleep();
   }
 
@@ -156,6 +189,14 @@ void loop() {
   digitalWrite(2, LOW);
 
   print_mifare_uid(uid2clone, uid_len);
+  logs.println("---------------------------------------------------------------");
+  logs.print("[1] UID : ");
+
+  for (uint8_t i = 0; i < uid_len; ++i) {
+    logs.printf("%02x ", uid2clone[i]);
+  }
+
+  logs.println();
 
   while (!card_auth && auth_attemps) {
     card_auth = nfc.mifareclassic_AuthenticateBlock(uid2clone, uid_len, ZERO_BLOCK, MIFARE_CMD_AUTH_A, key);
@@ -173,12 +214,20 @@ void loop() {
     if (card_read) {
       Serial.println("[+] Card for cloning read");
       print_mifare_block_data(block_data);
+      logs.print("[2] 0 block : ");
+
+      for (uint8_t i = 0; i < BLOCK_SIZE; ++i) {
+        logs.printf("%02x ", block_data[i]);
+      }
     } else {
       Serial.println("[-] Cannot read data from card for cloning. Got only UID without full 0-block");
     }
   } else {
     Serial.println("[-] Cannot authentificate to card for cloning. Got only UID without full 0-block");
   }
+
+  logs.println("\n---------------------------------------------------------------\n");
+  logs.close();
 
   card_found = false;
   uid_attemps = 100;
@@ -234,7 +283,7 @@ void loop() {
       Serial.println("[-] Cannot read data from clone card");
     }
 
-    if (is_block_empty(block_data) || is_jcop41(block_data)) {
+    if (is_block_empty(block_data) || is_not_mifare(block_data)) {
       copy(uid2clone, block_data, UID_LEN);
       block_data[4] = calculate_checksum(uid2clone);
       copy(old_clone_block_data + 5, block_data + 5, BLOCK_SIZE - 5);
