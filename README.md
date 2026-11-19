@@ -18,4 +18,4 @@ A collection of low-level tools, hardware/NFC firmware, and network experiments 
 ## Lab & Usage Notes
 
 * **Authorized Environments Only:** Test network and RF/NFC tools (`arp-spoofer`, `rfid_pn532_cloner`) strictly on hardware, networks, and cards you own or have explicit permission to test.
-* **Work in Progress:** Some utilities (such as `sh2peer`) are iterative prototypes—check individual repository `README`s or source files for build steps and current limitations.
+* **Work in Progress:** Some utilities (such as `sh2peer`) are iterative prototypes - check individual repository `README`s or source files for build steps and current limitations.
